@@ -84,9 +84,11 @@ def build_argv(
     ``delete`` and ``storage_class`` override the job/settings values when given
     (used by CLI flags and the TUI). ``delete=None`` falls back to the job.
 
-    ``quiet_progress`` adds ``--only-show-errors`` so the CLI emits one line per
-    completed file (which we parse for progress) instead of in-place transfer
-    bars that don't survive being piped to a background log.
+    ``quiet_progress`` adds ``--no-progress``: the CLI still prints one
+    ``upload: …`` line per completed file (which we parse to advance progress),
+    but drops the in-place per-file byte counter that spams a piped log. Note we
+    must NOT use ``--only-show-errors`` here — that suppresses the per-file
+    lines too, leaving us nothing to count.
     """
     source = str(job.resolved_local_path())
     destination = job.destination()
@@ -105,7 +107,7 @@ def build_argv(
     if sc in _GLACIER_CLASSES:
         argv.append("--ignore-glacier-warnings")
     if quiet_progress:
-        argv.append("--only-show-errors")
+        argv.append("--no-progress")
     for pattern in job.effective_excludes():
         argv += ["--exclude", pattern]
 

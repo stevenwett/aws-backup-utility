@@ -23,12 +23,15 @@ def test_non_glacier_no_ignore_warnings():
     assert "--ignore-glacier-warnings" not in plan.argv
 
 
-def test_quiet_progress_adds_only_show_errors():
+def test_quiet_progress_uses_no_progress_not_only_show_errors():
     job, settings = make()
     plan = sync.build_argv(job, settings, aws_path=AWS, quiet_progress=True)
-    assert "--only-show-errors" in plan.argv
+    # --no-progress keeps the per-file "upload:" lines we count;
+    # --only-show-errors would suppress them, so it must NOT be used.
+    assert "--no-progress" in plan.argv
+    assert "--only-show-errors" not in plan.argv
     plan2 = sync.build_argv(job, settings, aws_path=AWS, quiet_progress=False)
-    assert "--only-show-errors" not in plan2.argv
+    assert "--no-progress" not in plan2.argv
 
 
 def test_transfer_env_sets_tuning_defaults():
