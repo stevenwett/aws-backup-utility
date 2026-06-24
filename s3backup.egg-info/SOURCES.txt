@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+s3backup/__init__.py
+s3backup/__main__.py
+s3backup/tiers.py
+s3backup.egg-info/PKG-INFO
+s3backup.egg-info/SOURCES.txt
+s3backup.egg-info/dependency_links.txt
+s3backup.egg-info/entry_points.txt
+s3backup.egg-info/requires.txt
+s3backup.egg-info/top_level.txt

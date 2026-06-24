@@ -1,0 +1,9 @@
+questionary>=2.0
+rich>=13.0
+tomli-w>=1.0
+
+[:python_version < "3.11"]
+tomli>=2.0
+
+[dev]
+pytest>=7.0
