@@ -282,10 +282,19 @@ def cmd_run_internal(args) -> int:
         ui.console.print(f"[red]{exc}[/]")
         return 2
     try:
-        return runner.run_backup(config, job, force=args.force)
+        code = runner.run_backup(config, job, force=args.force)
     except aws.AwsError as exc:
         ui.console.print(f"[red]{exc}[/]")
         return 1
+
+    # A continuous (non-scheduled) agent uses KeepAlive to retry until success.
+    # Once it succeeds, it has finished its purpose — tear itself down so it
+    # doesn't loop forever. Scheduled agents stay installed for the next day.
+    if code == 0 and not args.scheduled:
+        from s3backup import daemon
+
+        daemon.remove(job.name)
+    return code
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -87,6 +87,67 @@ s3backup edit documents            # edit a job interactively
 `--yes` is required to apply changes in a non-interactive shell (no TTY); this
 prevents an unattended run from making unexpected changes.
 
+`sync` is the **attended** command: it previews first and is best for small or
+ad-hoc runs. For a large folder you want to back up and walk away from, use
+`start` (below).
+
+## Large directories & walk-away backups
+
+For a big initial upload (hundreds of GB or multi-TB), use the managed
+background backup. You run one command and can close the terminal — even let
+the Mac sleep or reboot — and it keeps going until done.
+
+```sh
+s3backup start storage      # begin a continuous background backup
+s3backup status storage     # check progress from any terminal
+s3backup status storage -w  # live, auto-refreshing view (Ctrl-C just exits the view)
+s3backup stop storage       # cancel it
+```
+
+`start` runs the backup under `launchd` with keep-awake (`caffeinate`) and
+auto-restart, so it survives sleep, network blips, and reboots. `aws s3 sync`
+resumes by skipping already-uploaded files, so a restart never re-uploads. When
+the upload finishes, the background job tears itself down and you get a
+notification. Checking `status` while it runs looks like:
+
+```
+storage — uploading (running)
+  1.2 TB / 2.1 TB  (57.1%)   142,310 / 251,002 files
+  elapsed 4h 2m · ETA ~3h 5m
+```
+
+### Keeping it current automatically
+
+```sh
+s3backup schedule storage              # daily at 03:00
+s3backup schedule storage --hour 2     # daily at 02:00
+s3backup unschedule storage            # remove the schedule
+```
+
+A scheduled run first checks the folder **locally** for changes. **If nothing
+changed, it exits immediately and makes no S3 API calls at all** — so idle days
+cost nothing. It only contacts S3 when there's something new to upload.
+
+## Cost-conscious behavior
+
+This tool is built to minimize ongoing AWS cost:
+
+- **No-op runs are free.** A local manifest (size + mtime per file) is compared
+  before each run; with no local changes, no S3 LIST/PUT requests are made.
+  Use `s3backup sync <job> --force`-style intent by running `start` if you ever
+  want to force a full reconcile.
+- **Incomplete uploads are auto-cleaned.** On the first run, the tool sets a
+  bucket lifecycle rule to abort incomplete multipart uploads after 7 days,
+  preventing a classic silent cost leak from interrupted large uploads.
+- **Archive tiers are handled cleanly.** Syncing to `GLACIER`/`DEEP_ARCHIVE`
+  passes `--ignore-glacier-warnings` automatically.
+- **Tuned for throughput.** Concurrency and multipart sizing are raised for
+  large transfers (override via the standard `AWS_*` environment variables).
+
+> Tier choice drives storage cost. For a rarely-accessed photo archive,
+> `DEEP_ARCHIVE` is cheapest (~$1/TB/mo) but has a 180-day minimum and ~12h
+> retrieval; `GLACIER_IR` is a middle ground with instant retrieval.
+
 ## Storage classes
 
 `STANDARD`, `STANDARD_IA`, `ONEZONE_IA`, `INTELLIGENT_TIERING`, `GLACIER_IR`,
@@ -105,14 +166,13 @@ prevents an unattended run from making unexpected changes.
   `.DocumentRevisions-V100` — useful when backing up a mounted volume under
   `/Volumes`. Add your own patterns via a job's `exclude` list.
 
-## Scheduling (optional)
+## Checking on a running backup
 
-The scriptable form is cron/launchd-ready. For example, a daily backup via
-`launchd` would run:
-
-```sh
-s3backup sync documents --yes
-```
+A run writes its progress to `~/.config/s3backup/state/<job>.json`, and the
+runner and `status` reader are decoupled — so `s3backup status` works from any
+terminal, after closing your laptop, or while a background/scheduled job runs.
+Status phases: `scanning`, `no-changes`, `uploading`, `retrying`, `done`,
+`failed`. Logs for background runs are in `~/.config/s3backup/logs/`.
 
 ## Development
 
