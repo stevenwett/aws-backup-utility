@@ -166,13 +166,87 @@ This tool is built to minimize ongoing AWS cost:
   `.DocumentRevisions-V100` — useful when backing up a mounted volume under
   `/Volumes`. Add your own patterns via a job's `exclude` list.
 
-## Checking on a running backup
+## Managing running jobs
 
-A run writes its progress to `~/.config/s3backup/state/<job>.json`, and the
-runner and `status` reader are decoupled — so `s3backup status` works from any
-terminal, after closing your laptop, or while a background/scheduled job runs.
-Status phases: `scanning`, `no-changes`, `uploading`, `retrying`, `done`,
-`failed`. Logs for background runs are in `~/.config/s3backup/logs/`.
+Once a backup is running in the background, manage it from **any** terminal —
+you don't need the window you started it in. Progress is written to a state file
+that `status` reads, so closing the laptop or rebooting doesn't lose track of a
+running job.
+
+### Command cheatsheet
+
+```sh
+s3backup status                 # snapshot of ALL jobs
+s3backup status [job-name]      # snapshot of one job
+s3backup status -w              # live, auto-refreshing view of all jobs
+s3backup status [job-name] -w   # live view of one job (Ctrl-C exits view, not the backup)
+
+s3backup start [job-name]       # start / resume a background backup
+s3backup stop [job-name]        # cancel a running background backup
+
+s3backup schedule [job-name]    # keep it current daily (03:00 by default)
+s3backup unschedule [job-name]  # remove the daily schedule
+```
+
+> `-w` / `--watch` only **displays** progress. Pressing **Ctrl-C exits the
+> view** — the backup keeps running in the background. To actually stop a
+> backup, use `s3backup stop <job>`.
+
+### Reading the status output
+
+```
+videos — uploading (running)
+  142.0 GB / 211.0 GB  (67.3%)   8,041 / 12,233 files
+  elapsed 1h 12m · ETA ~35m
+  last: upload: 2023/clip_0440.mov
+```
+
+- **Phase** (after the job name) is one of:
+  | Phase        | Meaning |
+  |--------------|---------|
+  | `scanning`   | Walking the local folder to find changes (no S3 calls yet). |
+  | `no-changes` | Nothing changed locally; finished without contacting S3. |
+  | `uploading`  | Actively transferring files. |
+  | `retrying`   | A transient error occurred; backing off and retrying. |
+  | `done`       | Completed successfully. |
+  | `failed`     | Gave up after retries — see `message` and the logs. |
+- **`(running)`** appears only while the background process is actually alive.
+  Its absence on a `done`/`failed` job is normal.
+- **Percent / ETA** are estimated from file counts and throughput so far, so
+  they're approximate — especially early on, while the initial scan completes.
+
+### Running several jobs at once
+
+Each job is independent — start as many as you like; they run in parallel:
+
+```sh
+s3backup start [job-1]
+s3backup start [job-2]
+s3backup status -w        # watch them both
+```
+
+They share the disk and your upload bandwidth, so two large jobs simply split
+throughput between them. That's fine — it's slower per job, not harmful.
+
+### Where things live
+
+- **Progress state:** `~/.config/s3backup/state/<job>.json`
+- **Background logs:** `~/.config/s3backup/logs/<job>.out.log` and `<job>.err.log`
+- **launchd agents:** `~/Library/LaunchAgents/com.s3backup.<job>.plist`
+
+### Troubleshooting
+
+- **`status` says "No run recorded"** — the job hasn't been started yet. Run
+  `s3backup start <job>`.
+- **Phase is `failed`** — read the one-line reason in `status`, then the tail of
+  `~/.config/s3backup/logs/<job>.err.log`. Fix the cause (e.g. remount the
+  drive, fix credentials) and `s3backup start <job>` again; it resumes by
+  skipping already-uploaded files.
+- **It seems stuck at 0%** — during a large initial upload the `scanning` phase
+  and the AWS CLI's own directory listing run before the first file completes.
+  Give it a few minutes; the counter then climbs.
+- **The drive was unplugged** — the run errors out safely (with `delete = off`,
+  nothing in the bucket is ever removed). Remount and `start` again.
 
 ## Development
 

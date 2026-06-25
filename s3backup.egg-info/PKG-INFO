@@ -36,4 +36,184 @@ Provides-Extra: dev
 Requires-Dist: pytest>=7.0; extra == "dev"
 Dynamic: license-file
 
-# aws-backup-utility
+# s3backup
+
+A terminal utility for macOS that wraps the AWS CLI to keep a local folder in
+sync with an S3 bucket, with control over the storage tier. One-way backup
+(local → S3), driven by named jobs in a config file. Use it interactively with
+arrow-key menus, or non-interactively for scripts and cron.
+
+It shells out to `aws s3 sync` under the hood, so you get its battle-tested
+delta syncing for free.
+
+## Requirements
+
+- macOS (or any Unix), Python 3.9+
+- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+  installed and on your `PATH`, with credentials configured (`aws configure`)
+
+## Install
+
+```sh
+# Recommended: isolated install via pipx
+pipx install .
+
+# Or in a virtualenv for development
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+```
+
+This installs an `s3backup` command.
+
+## Configuration
+
+Config lives at `~/.config/s3backup/config.toml` (override with the
+`S3BACKUP_CONFIG` environment variable). A commented template is created on
+first run. Find the path with:
+
+```sh
+s3backup config path
+```
+
+Example config:
+
+```toml
+[settings]
+default_storage_class = "STANDARD_IA"
+# aws_profile = "default"          # optional, uses this AWS named profile
+
+[jobs.documents]
+local_path = "~/Documents"
+bucket = "my-backup-bucket"
+prefix = "documents"               # -> s3://my-backup-bucket/documents
+storage_class = "DEEP_ARCHIVE"     # optional; overrides default_storage_class
+delete = false                     # propagate local deletions to the bucket
+exclude = ["*.tmp"]                # optional extra glob patterns
+
+[jobs.photos]
+local_path = "~/Pictures/Library"
+bucket = "my-backup-bucket"
+prefix = "photos"
+```
+
+## Usage
+
+### Interactive
+
+```sh
+s3backup
+```
+
+Launches a menu: pick a job, confirm/override the storage tier, choose whether
+to propagate deletions, review a **dry-run preview**, then confirm to run the
+real sync.
+
+### Non-interactive (scripts / cron)
+
+```sh
+s3backup list                      # show configured jobs
+s3backup check documents           # verify creds, bucket access, local path
+s3backup sync documents --dry-run  # preview changes, make none
+s3backup sync documents            # sync (prompts to confirm)
+s3backup sync documents --yes      # sync without confirmation (for cron)
+s3backup sync documents --delete --storage-class GLACIER --yes
+s3backup tiers                     # list available storage classes
+s3backup add                       # add a job interactively
+s3backup edit documents            # edit a job interactively
+```
+
+`--yes` is required to apply changes in a non-interactive shell (no TTY); this
+prevents an unattended run from making unexpected changes.
+
+`sync` is the **attended** command: it previews first and is best for small or
+ad-hoc runs. For a large folder you want to back up and walk away from, use
+`start` (below).
+
+## Large directories & walk-away backups
+
+For a big initial upload (hundreds of GB or multi-TB), use the managed
+background backup. You run one command and can close the terminal — even let
+the Mac sleep or reboot — and it keeps going until done.
+
+```sh
+s3backup start storage      # begin a continuous background backup
+s3backup status storage     # check progress from any terminal
+s3backup status storage -w  # live, auto-refreshing view (Ctrl-C just exits the view)
+s3backup stop storage       # cancel it
+```
+
+`start` runs the backup under `launchd` with keep-awake (`caffeinate`) and
+auto-restart, so it survives sleep, network blips, and reboots. `aws s3 sync`
+resumes by skipping already-uploaded files, so a restart never re-uploads. When
+the upload finishes, the background job tears itself down and you get a
+notification. Checking `status` while it runs looks like:
+
+```
+storage — uploading (running)
+  1.2 TB / 2.1 TB  (57.1%)   142,310 / 251,002 files
+  elapsed 4h 2m · ETA ~3h 5m
+```
+
+### Keeping it current automatically
+
+```sh
+s3backup schedule storage              # daily at 03:00
+s3backup schedule storage --hour 2     # daily at 02:00
+s3backup unschedule storage            # remove the schedule
+```
+
+A scheduled run first checks the folder **locally** for changes. **If nothing
+changed, it exits immediately and makes no S3 API calls at all** — so idle days
+cost nothing. It only contacts S3 when there's something new to upload.
+
+## Cost-conscious behavior
+
+This tool is built to minimize ongoing AWS cost:
+
+- **No-op runs are free.** A local manifest (size + mtime per file) is compared
+  before each run; with no local changes, no S3 LIST/PUT requests are made.
+  Use `s3backup sync <job> --force`-style intent by running `start` if you ever
+  want to force a full reconcile.
+- **Incomplete uploads are auto-cleaned.** On the first run, the tool sets a
+  bucket lifecycle rule to abort incomplete multipart uploads after 7 days,
+  preventing a classic silent cost leak from interrupted large uploads.
+- **Archive tiers are handled cleanly.** Syncing to `GLACIER`/`DEEP_ARCHIVE`
+  passes `--ignore-glacier-warnings` automatically.
+- **Tuned for throughput.** Concurrency and multipart sizing are raised for
+  large transfers (override via the standard `AWS_*` environment variables).
+
+> Tier choice drives storage cost. For a rarely-accessed photo archive,
+> `DEEP_ARCHIVE` is cheapest (~$1/TB/mo) but has a 180-day minimum and ~12h
+> retrieval; `GLACIER_IR` is a middle ground with instant retrieval.
+
+## Storage classes
+
+`STANDARD`, `STANDARD_IA`, `ONEZONE_IA`, `INTELLIGENT_TIERING`, `GLACIER_IR`,
+`GLACIER`, `DEEP_ARCHIVE`. Run `s3backup tiers` for descriptions.
+
+## Safety notes
+
+- **Backups are one-way (local → S3).** This tool never writes to your local
+  folder.
+- **Deletions are off by default.** Remote files are kept even if deleted
+  locally. Enable mirroring per run with `--delete` (or per job via
+  `delete = true`). A dry-run preview always runs first so you see what
+  `--delete` would remove before confirming.
+- **macOS metadata is excluded automatically.** Every job skips `.DS_Store`,
+  `.Spotlight-V100`, `.fseventsd`, `.Trashes`, `.TemporaryItems`, and
+  `.DocumentRevisions-V100` — useful when backing up a mounted volume under
+  `/Volumes`. Add your own patterns via a job's `exclude` list.
+
+## Checking on a running backup
+
+A run writes its progress to `~/.config/s3backup/state/<job>.json`, and the
+runner and `status` reader are decoupled — so `s3backup status` works from any
+terminal, after closing your laptop, or while a background/scheduled job runs.
+Status phases: `scanning`, `no-changes`, `uploading`, `retrying`, `done`,
+`failed`. Logs for background runs are in `~/.config/s3backup/logs/`.
+
+## Development
+
+```sh
+.venv/bin/pytest        # run the test suite (no AWS calls)
+```
