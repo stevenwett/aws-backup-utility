@@ -188,7 +188,7 @@ def cmd_status(args) -> int:
     for i, name in enumerate(jobs):
         if i:
             ui.console.print()
-        ui.render_status(state_mod.read_state(name))
+        ui.render_status(state_mod.read_state(name), job_name=name)
     return 0
 
 
@@ -214,7 +214,7 @@ def _watch_status(jobs) -> int:
             for i, name in enumerate(jobs):
                 if i:
                     tmp.print()
-                ui.render_status(state_mod.read_state(name))
+                ui.render_status(state_mod.read_state(name), job_name=name)
             tmp.print("\n[dim]watching — Ctrl-C to exit (backup keeps running)[/]")
         finally:
             ui.console = original

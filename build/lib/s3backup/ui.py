@@ -143,19 +143,46 @@ _PHASE_STYLE = {
 }
 
 
-def render_status(st) -> None:
-    """Render a one-shot snapshot of a job's run state."""
+def _display_phase(st) -> str:
+    """User-facing label for a run state.
+
+    The internal phases ``no-changes`` (skipped via local scan, no S3 calls) and
+    ``done`` with zero uploads (verified against S3, nothing new) both mean the
+    same thing to a user — so we surface both as ``up to date``. The how-it-got-
+    there detail stays in the dim message line.
+    """
+    from s3backup import state as state_mod
+
+    # A successful run means everything that needed uploading was uploaded, so
+    # the job is up to date — whether it uploaded files or found nothing new.
+    if st.phase in (state_mod.PHASE_NO_CHANGES, state_mod.PHASE_DONE):
+        return "up to date"
+    return st.phase
+
+
+def render_status(st, job_name: Optional[str] = None) -> None:
+    """Render a one-shot snapshot of a job's run state.
+
+    ``job_name`` lets us still show schedule info for a job that has a schedule
+    but has never run yet (so ``st`` is None).
+    """
     from s3backup import state as state_mod
     from s3backup.scan import human_bytes
 
     if st is None:
-        console.print("[dim]No run recorded for this job yet.[/]")
+        name = job_name or "(unknown)"
+        console.print(f"[bold]{name}[/] — [dim]no run recorded yet[/]")
+        if job_name:
+            _render_schedule_line(job_name)
         return
 
-    style = _PHASE_STYLE.get(st.phase, "white")
+    label = _display_phase(st)
+    style = "green" if label == "up to date" else _PHASE_STYLE.get(st.phase, "white")
     running = st.is_active and state_mod.pid_alive(st.pid)
     live = " [dim](running)[/]" if running else ""
-    console.print(f"[bold]{st.job}[/] — [{style}]{st.phase}[/]{live}")
+    console.print(f"[bold]{st.job}[/] — [{style}]{label}[/]{live}")
+
+    _render_schedule_line(st.job)
 
     # Line 1 — the whole backup set, so you always see the full picture.
     if st.total_files:
@@ -164,36 +191,80 @@ def render_status(st) -> None:
             f"across {st.total_files:,} files"
         )
 
-    # Line 2 + bar — this run's actual upload work (new/changed files only).
-    if st.phase in ("uploading", "retrying", "done"):
+    # Upload detail + bar — only while there is (or was) real work this run.
+    has_pending = st.phase in ("uploading", "retrying") or (
+        st.phase == "done" and st.pending_files > 0
+    )
+    if has_pending:
         pending_files = max(st.pending_files, 0)
-        if pending_files == 0:
-            console.print("  [green]Up to date — nothing new to upload.[/]")
-        else:
-            remaining_files = max(pending_files - st.done_files, 0)
-            remaining_bytes = max(st.pending_bytes - st.done_bytes, 0)
-            console.print(
-                f"  To upload: {human_bytes(st.pending_bytes)} "
-                f"in {pending_files:,} new file(s) "
-                f"[dim]({human_bytes(remaining_bytes)} / "
-                f"{remaining_files:,} remaining)[/]"
-            )
-            console.print(
-                "  " + _progress_bar(st.percent)
-                + f"  [bold]{st.percent:.1f}%[/]  "
-                + f"{st.done_files:,} / {pending_files:,} uploaded"
-            )
-            line2 = f"  elapsed {_fmt_duration(st.elapsed)}"
-            if st.phase == "uploading":
-                line2 += f" · ETA ~{_fmt_duration(st.eta_seconds)}"
-            if st.attempt:
-                line2 += f" · attempt {st.attempt + 1}"
-            console.print(line2)
+        remaining_files = max(pending_files - st.done_files, 0)
+        remaining_bytes = max(st.pending_bytes - st.done_bytes, 0)
+        console.print(
+            f"  To upload: {human_bytes(st.pending_bytes)} "
+            f"in {pending_files:,} new file(s) "
+            f"[dim]({human_bytes(remaining_bytes)} / "
+            f"{remaining_files:,} remaining)[/]"
+        )
+        console.print(
+            "  " + _progress_bar(st.percent)
+            + f"  [bold]{st.percent:.1f}%[/]  "
+            + f"{st.done_files:,} / {pending_files:,} uploaded"
+        )
+        line2 = f"  elapsed {_fmt_duration(st.elapsed)}"
+        if st.phase == "uploading":
+            line2 += f" · ETA ~{_fmt_duration(st.eta_seconds)}"
+        if st.attempt:
+            line2 += f" · attempt {st.attempt + 1}"
+        console.print(line2)
 
+    # Dim detail line. For an up-to-date job this carries the only extra info
+    # worth keeping (whether S3 was contacted); the header already says the rest.
     if st.message:
         console.print(f"  [dim]{st.message}[/]")
     if st.last_line and running:
         console.print(f"  [dim]last: {st.last_line}[/]")
+
+
+def _fmt_until(seconds) -> str:
+    """Human 'time from now' for a future epoch delta (e.g. 'in 3h 5m')."""
+    seconds = int(max(0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, _ = divmod(rem, 60)
+    if h:
+        return f"in {h}h {m}m"
+    if m:
+        return f"in {m}m"
+    return "in <1m"
+
+
+def _render_schedule_line(job: str) -> None:
+    """Show whether the job is scheduled/continuous and when it next runs."""
+    import time as _time
+
+    from s3backup import daemon
+
+    info = daemon.schedule_info(job)
+    if info is None:
+        console.print("  [dim]Schedule:  not scheduled (run manually with "
+                      f"'s3backup start {job}' or 's3backup schedule {job}')[/]")
+        return
+
+    if info["kind"] == "continuous":
+        state_txt = "active" if info["loaded"] else "installed but not loaded"
+        console.print(f"  [dim]Schedule:[/]  continuous backup ({state_txt})")
+        return
+
+    when = f"{info['hour']:02d}:{info['minute']:02d}"
+    if info["loaded"]:
+        delta = info["next_run"] - _time.time()
+        console.print(
+            f"  Schedule:  daily at {when} — next run {_fmt_until(delta)}"
+        )
+    else:
+        console.print(
+            f"  [yellow]Schedule:  daily at {when} configured but NOT loaded[/] "
+            f"(run 's3backup schedule {job}')"
+        )
 
 
 def _progress_bar(percent: float, width: int = 28) -> str:

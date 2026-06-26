@@ -80,3 +80,14 @@ def test_read_tolerates_unknown_fields(tmp_path):
     loaded = state.read_state("j")
     assert loaded is not None
     assert loaded.phase == "done"
+
+
+def test_display_phase_merges_done_and_no_changes(monkeypatch):
+    from s3backup import ui, state as s
+    # done with uploads, done with zero uploads, and no-changes all read the same.
+    assert ui._display_phase(s.RunState(job="j", phase=s.PHASE_DONE, done_files=50)) == "up to date"
+    assert ui._display_phase(s.RunState(job="j", phase=s.PHASE_DONE, done_files=0)) == "up to date"
+    assert ui._display_phase(s.RunState(job="j", phase=s.PHASE_NO_CHANGES)) == "up to date"
+    # Active/failed phases are shown verbatim.
+    assert ui._display_phase(s.RunState(job="j", phase=s.PHASE_UPLOADING)) == "uploading"
+    assert ui._display_phase(s.RunState(job="j", phase=s.PHASE_FAILED)) == "failed"

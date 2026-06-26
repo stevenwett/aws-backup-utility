@@ -134,6 +134,47 @@ def kickstart(job: str) -> None:
                    capture_output=True, text=True)
 
 
+def schedule_info(job: str) -> Optional[dict]:
+    """Describe a job's installed agent, or None if it has no plist.
+
+    Returns a dict with:
+      - kind: "scheduled" | "continuous"
+      - loaded: bool (is the agent registered with launchd)
+      - hour, minute: for scheduled agents
+      - next_run: epoch seconds of the next daily fire (scheduled only)
+    """
+    path = plist_path(job)
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as fh:
+            doc = plistlib.load(fh)
+    except Exception:
+        return None
+
+    info = {"loaded": is_loaded(job)}
+    cal = doc.get("StartCalendarInterval")
+    if isinstance(cal, dict):
+        hour = int(cal.get("Hour", 0))
+        minute = int(cal.get("Minute", 0))
+        info.update(kind="scheduled", hour=hour, minute=minute,
+                    next_run=_next_daily_run(hour, minute))
+    else:
+        info["kind"] = "continuous"
+    return info
+
+
+def _next_daily_run(hour: int, minute: int) -> float:
+    """Epoch seconds of the next time today/tomorrow that HH:MM occurs."""
+    import datetime as _dt
+
+    now = _dt.datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += _dt.timedelta(days=1)
+    return target.timestamp()
+
+
 def remove(job: str) -> None:
     """Unload and delete the agent's plist entirely."""
     unload(job)
