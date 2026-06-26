@@ -157,25 +157,50 @@ def render_status(st) -> None:
     live = " [dim](running)[/]" if running else ""
     console.print(f"[bold]{st.job}[/] — [{style}]{st.phase}[/]{live}")
 
-    if st.phase in ("uploading", "retrying", "done") and st.total_files:
-        bar_done = human_bytes(st.done_bytes)
-        bar_total = human_bytes(st.total_bytes)
+    # Line 1 — the whole backup set, so you always see the full picture.
+    if st.total_files:
         console.print(
-            f"  {bar_done} / {bar_total}  "
-            f"([bold]{st.percent:.1f}%[/])   "
-            f"{st.done_files:,} / {st.total_files:,} files"
+            f"  Backup:    {human_bytes(st.total_bytes)} "
+            f"across {st.total_files:,} files"
         )
-        line2 = f"  elapsed {_fmt_duration(st.elapsed)}"
-        if st.phase == "uploading":
-            line2 += f" · ETA ~{_fmt_duration(st.eta_seconds)}"
-        if st.attempt:
-            line2 += f" · attempt {st.attempt + 1}"
-        console.print(line2)
+
+    # Line 2 + bar — this run's actual upload work (new/changed files only).
+    if st.phase in ("uploading", "retrying", "done"):
+        pending_files = max(st.pending_files, 0)
+        if pending_files == 0:
+            console.print("  [green]Up to date — nothing new to upload.[/]")
+        else:
+            remaining_files = max(pending_files - st.done_files, 0)
+            remaining_bytes = max(st.pending_bytes - st.done_bytes, 0)
+            console.print(
+                f"  To upload: {human_bytes(st.pending_bytes)} "
+                f"in {pending_files:,} new file(s) "
+                f"[dim]({human_bytes(remaining_bytes)} / "
+                f"{remaining_files:,} remaining)[/]"
+            )
+            console.print(
+                "  " + _progress_bar(st.percent)
+                + f"  [bold]{st.percent:.1f}%[/]  "
+                + f"{st.done_files:,} / {pending_files:,} uploaded"
+            )
+            line2 = f"  elapsed {_fmt_duration(st.elapsed)}"
+            if st.phase == "uploading":
+                line2 += f" · ETA ~{_fmt_duration(st.eta_seconds)}"
+            if st.attempt:
+                line2 += f" · attempt {st.attempt + 1}"
+            console.print(line2)
 
     if st.message:
         console.print(f"  [dim]{st.message}[/]")
     if st.last_line and running:
         console.print(f"  [dim]last: {st.last_line}[/]")
+
+
+def _progress_bar(percent: float, width: int = 28) -> str:
+    """A simple text progress bar like ``[█████████·············]``."""
+    pct = max(0.0, min(100.0, percent))
+    filled = int(round(width * pct / 100.0))
+    return "[cyan][" + "█" * filled + "·" * (width - filled) + "][/]"
 
 
 def tier_table() -> Table:

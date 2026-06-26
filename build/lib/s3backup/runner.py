@@ -70,20 +70,35 @@ def run_backup(
     excludes = job.effective_excludes()
     current = manifest.build_manifest(root, excludes)
 
-    if not force:
-        previous = manifest.load_manifest(job.name)
-        changes = manifest.diff(previous, current)
-        if previous and not changes.has_changes:
-            st.phase = state.PHASE_NO_CHANGES
-            st.finished_at = time.time()
-            st.exit_code = 0
-            st.message = "No local changes — nothing to upload (no S3 calls made)."
-            publish()
-            return 0
-
-    # Totals for the progress denominator (from the freshly built manifest).
+    # The whole backup set — shown so the user sees the full picture.
     st.total_files = len(current)
     st.total_bytes = sum(size for size, _ in current.values())
+
+    previous = manifest.load_manifest(job.name)
+    changes = manifest.diff(previous, current)
+
+    if not force and previous and not changes.has_changes:
+        st.phase = state.PHASE_NO_CHANGES
+        st.finished_at = time.time()
+        st.exit_code = 0
+        st.message = "No local changes — nothing to upload (no S3 calls made)."
+        publish()
+        return 0
+
+    # What this run actually needs to upload: the changed/new files. When we
+    # have no prior manifest (first run, or it was cleared) we can't know what's
+    # already in S3 locally, so treat the whole set as pending — aws s3 sync
+    # will still skip anything already uploaded, and the bar tracks real
+    # transfers as they complete.
+    if previous and not force:
+        changed_paths = set(changes.added) | set(changes.modified)
+        st.pending_files = len(changed_paths)
+        st.pending_bytes = sum(
+            current[p][0] for p in changed_paths if p in current
+        )
+    else:
+        st.pending_files = st.total_files
+        st.pending_bytes = st.total_bytes
 
     # Cost guard: make sure interrupted multipart uploads can't linger as
     # billable orphans. Best-effort; don't fail the backup if it can't be set.
@@ -116,16 +131,20 @@ def run_backup(
 
         code, last_error = _stream_sync(argv, env, st, publish)
         if code == 0:
+            # aws s3 sync's exit code is the source of truth: 0 means every
+            # file that needed uploading was uploaded (it skips files already
+            # in S3). Record the manifest so future runs can detect no-ops.
             st.phase = state.PHASE_DONE
             st.finished_at = time.time()
             st.exit_code = 0
-            st.message = "Backup complete."
+            st.done_bytes = st.pending_bytes  # finished => pending fully done
+            if st.done_files == 0:
+                st.message = "Already in sync — no new files to upload."
+            else:
+                st.message = f"Backup complete — uploaded {st.done_files:,} new file(s)."
             manifest.save_manifest(job.name, current)
             publish()
-            notify.notify(
-                "s3backup",
-                f"'{job.name}' backup complete — {st.done_files} file(s) uploaded.",
-            )
+            notify.notify("s3backup", f"'{job.name}': {st.message}")
             return 0
 
         # Failed this attempt. Back off and retry unless we're out of attempts.
@@ -149,9 +168,17 @@ def run_backup(
 def _stream_sync(argv, env, st: state.RunState, publish) -> tuple:
     """Run one ``aws s3 sync`` attempt, streaming and counting completed files.
 
-    Returns (exit_code, last_error_text). Updates ``st`` as lines arrive but
-    throttles disk writes to ~once per second.
+    Returns ``(exit_code, last_error_text)``. Updates ``st`` as lines arrive but
+    throttles disk writes to ~once per second. Progress bytes are estimated from
+    the fraction of *pending* files completed (the CLI stream gives no per-file
+    size), so the bar tracks this run's actual upload work.
     """
+    def _estimate_bytes():
+        if st.pending_files:
+            st.done_bytes = int(
+                st.pending_bytes * min(st.done_files, st.pending_files) / st.pending_files
+            )
+
     proc = subprocess.Popen(
         argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
@@ -170,24 +197,20 @@ def _stream_sync(argv, env, st: state.RunState, publish) -> tuple:
             st.done_files += 1
             st.last_line = line[:200]
         elif action is None:
-            # Non-action output: likely a warning or error; keep a short tail.
+            # Non-action output: keep a short tail for error reporting only.
             lowered = line.lower()
-            if "error" in lowered or "fail" in lowered or "warning" in lowered:
+            if "error" in lowered or "fail" in lowered:
                 error_tail.append(line)
                 error_tail[:] = error_tail[-5:]
 
         now = time.time()
         if now - last_write >= 1.0:
-            # Estimate bytes done from fraction of files (no per-file size from
-            # the CLI stream; file-count fraction is a good proxy at scale).
-            if st.total_files:
-                st.done_bytes = int(st.total_bytes * st.done_files / st.total_files)
+            _estimate_bytes()
             publish()
             last_write = now
 
     proc.wait()
-    if st.total_files:
-        st.done_bytes = int(st.total_bytes * st.done_files / st.total_files)
+    _estimate_bytes()
     publish()
     return proc.returncode, "\n".join(error_tail)
 

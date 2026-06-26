@@ -25,19 +25,26 @@ def test_read_missing_returns_none(tmp_path):
     assert state.read_state("nope") is None
 
 
-def test_percent_and_eta():
+def test_percent_is_measured_against_pending_not_total():
+    # Library is 10000 bytes total, but only 1000 bytes pending this run.
     st = state.RunState(job="j", phase=state.PHASE_UPLOADING,
-                        total_bytes=1000, done_bytes=250)
-    assert st.percent == 25.0
-    # No elapsed time set yet -> ETA unknown
-    assert st.eta_seconds is None
+                        total_bytes=10000, pending_bytes=1000, done_bytes=250)
+    assert st.percent == 25.0  # 250 / 1000 pending
+    assert st.eta_seconds is None  # no elapsed yet
+
+
+def test_percent_is_100_when_nothing_pending():
+    # Already in sync: nothing to upload => fully done.
+    st = state.RunState(job="j", phase=state.PHASE_DONE,
+                        total_bytes=10000, pending_bytes=0, done_bytes=0)
+    assert st.percent == 100.0
 
 
 def test_eta_computes_from_throughput():
     import time
     st = state.RunState(job="j", phase=state.PHASE_UPLOADING,
                         started_at=time.time() - 10,
-                        total_bytes=1000, done_bytes=500)
+                        pending_bytes=1000, done_bytes=500)
     eta = st.eta_seconds
     # 500 bytes in 10s = 50 B/s; 500 remaining => ~10s
     assert eta is not None

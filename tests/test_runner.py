@@ -54,9 +54,9 @@ def test_runs_sync_when_changed_and_succeeds(tmp_path, monkeypatch):
 
     def fake_stream(argv, env, st, publish):
         calls["n"] += 1
-        st.done_files = st.total_files
+        st.done_files = st.pending_files
         publish()
-        return 0, ""
+        return 0, ""  # clean: exit 0, no error text
 
     monkeypatch.setattr(runner, "_stream_sync", fake_stream)
 
@@ -108,3 +108,44 @@ def test_force_runs_even_when_no_changes(tmp_path, monkeypatch):
     code = runner.run_backup(config, job, force=True, keep_awake=False)
     assert code == 0
     assert ran["n"] == 1  # forced past change detection
+
+
+def test_already_in_sync_message_when_zero_uploaded(tmp_path, monkeypatch):
+    """A clean run that uploads 0 files reads as 'already in sync', not a stall."""
+    job, config, data = make_job_and_config(tmp_path)
+
+    def no_uploads(argv, env, st, publish):
+        # aws s3 sync found nothing to upload (all already in S3).
+        return 0, ""
+
+    monkeypatch.setattr(runner, "_stream_sync", no_uploads)
+
+    code = runner.run_backup(config, job, force=True, keep_awake=False)
+    assert code == 0
+    st = state.read_state("j")
+    assert st.phase == state.PHASE_DONE
+    assert "already in sync" in st.message.lower()
+
+
+def test_pending_reflects_only_changed_files(tmp_path, monkeypatch):
+    """When a manifest exists, pending counts only new/changed files."""
+    job, config, data = make_job_and_config(tmp_path)
+    # Seed a manifest that matches the existing 'a.txt' so it's not pending.
+    seed = manifest.build_manifest(Path(job.local_path), job.effective_excludes())
+    manifest.save_manifest("j", seed)
+    # Add one new file -> exactly one pending.
+    (data / "new.txt").write_text("brand new")
+
+    captured = {}
+
+    def fake_stream(argv, env, st, publish):
+        captured["pending_files"] = st.pending_files
+        captured["total_files"] = st.total_files
+        st.done_files = st.pending_files
+        return 0, ""
+
+    monkeypatch.setattr(runner, "_stream_sync", fake_stream)
+    runner.run_backup(config, job, keep_awake=False)
+
+    assert captured["pending_files"] == 1      # only the new file
+    assert captured["total_files"] == 2        # whole set (a.txt + new.txt)

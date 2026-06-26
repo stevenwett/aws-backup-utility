@@ -39,8 +39,13 @@ class RunState:
     updated_at: Optional[float] = None
     finished_at: Optional[float] = None
 
+    # The whole backup set (everything under the job's local path).
     total_files: int = 0
     total_bytes: int = 0
+    # What this run actually needs to upload (new/changed files only).
+    pending_files: int = 0
+    pending_bytes: int = 0
+    # What has been uploaded so far this run.
     done_files: int = 0
     done_bytes: int = 0
 
@@ -54,9 +59,12 @@ class RunState:
 
     @property
     def percent(self) -> float:
-        if self.total_bytes <= 0:
-            return 0.0
-        return min(100.0, 100.0 * self.done_bytes / self.total_bytes)
+        # Progress is measured against this run's pending work, not the whole
+        # library — so an already-backed-up library doesn't read as 0%.
+        if self.pending_bytes <= 0:
+            # Nothing to upload => fully in sync.
+            return 100.0
+        return min(100.0, 100.0 * self.done_bytes / self.pending_bytes)
 
     @property
     def elapsed(self) -> float:
@@ -75,7 +83,7 @@ class RunState:
         rate = self.done_bytes / self.elapsed  # bytes/sec
         if rate <= 0:
             return None
-        remaining = max(0, self.total_bytes - self.done_bytes)
+        remaining = max(0, self.pending_bytes - self.done_bytes)
         return remaining / rate
 
     @property
